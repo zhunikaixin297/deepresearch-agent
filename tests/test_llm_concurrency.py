@@ -8,7 +8,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from src.backend.infrastructure.llm.factory import get_research_llm
 from langchain_core.messages import HumanMessage
+import pytest
 
+@pytest.mark.asyncio
 async def test_concurrency():
     llm = get_research_llm()
     print(f"LLM type: {type(llm)}")

@@ -150,7 +150,7 @@ def run_services():
         backend_env["PYTHONPATH"] = os.getcwd()
 
         uvicorn_process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "src.backend.api.server:app", "--port", "8002"],
+            [sys.executable, "-m", "uvicorn", "src.backend.api.server:app", "--host", "0.0.0.0", "--port", "8002"],
             env=backend_env,
             shell=False
         )

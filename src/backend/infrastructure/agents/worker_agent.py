@@ -22,10 +22,12 @@ from .utils import construct_messages_with_fallback
 async def search_node(state: WorkerState, config: RunnableConfig) -> Dict[str, Any]:
     """Worker 搜索节点 (代理到 Search Subgraph)"""
     task = state["task"]
+    goal = state["goal"]
     
     # 构造子图输入
     subgraph_input = {
         "task": task,
+        "goal": goal,
         "search_results": []
     }
     
@@ -53,12 +55,25 @@ async def summarize_node(state: WorkerState, config: RunnableConfig) -> Dict[str
     
     for idx, item in enumerate(raw_data_list, 1):
         content = item.get("content", "").strip()
-        source = item.get("document_name", "未知来源")
-        if item.get("url"):
-            source += f" / {item['url']}"
+        doc_name = item.get("document_name", "未知来源")
+        provider = item.get("provider", "")
+        
+        # 过滤系统提示或空结果（不再将其视为资料来源）
+        if doc_name in ["System"]:
+            continue
+            
+        # 构建带标签的来源名称
+        if provider == "session_rag":
+            source = f"{doc_name} (会话文档)"
+        elif provider == "knowledge base":
+            source = f"{doc_name} (知识库)"
+        elif item.get("url"):
+            source = f"{doc_name} / {item['url']}"
+        else:
+            source = doc_name
         
         # 过滤无效内容
-        if content and content != "未找到相关资料" and len(content) > 10:
+        if content and len(content) > 10:
             segment = f"--- 资料 {idx} (来源: {source}) ---\n{content}"
             context_segments.append(segment)
             references.add(source)

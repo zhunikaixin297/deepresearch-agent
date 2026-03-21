@@ -6,20 +6,23 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 
-import { FileText, CheckCircle, Edit3, Play, Loader, Clock, Terminal, Search, BookOpen, Upload } from 'lucide-react';
+import { FileText, CheckCircle, Edit3, Play, Loader, Clock, Terminal, Search, BookOpen, Upload, Trash2, RefreshCw, ChevronLeft, ChevronRight, File } from 'lucide-react';
 
 export default function App() {
-  const [goal, setGoal] = useState("调研时空网格编码技术");
-  const [threadId, setThreadId] = useState("thread_" + Date.now());
+  const [goal, setGoal] = useState("");
+  const [workspaceId, setWorkspaceId] = useState(null);
+  const [taskId, setTaskId] = useState(null);
   const [status, setStatus] = useState("idle"); 
   const [logs, setLogs] = useState([]);
   const [plan, setPlan] = useState(null);
   const [report, setReport] = useState("");
   const [feedback, setFeedback] = useState("");
   const [tasks, setTasks] = useState({});
+  const [isLogsVisible, setIsLogsVisible] = useState(true);
+  const [documents, setDocuments] = useState([]);
   
   // 上传相关状态
-  const [isUploading, setIsUploading] = useState(false);
+  const [uploadingCount, setUploadingCount] = useState(0);
   const fileInputRef = useRef(null);
   
   const eventSourceRef = useRef(null);
@@ -30,20 +33,73 @@ export default function App() {
   }, [logs]);
 
   const addLog = (message) => {
-    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), message }]);
+    const time = new Date().toLocaleTimeString();
+    setLogs(prev => [...prev, { time, message }]);
+  };
+
+  const resetSession = async () => {
+    if (status === "running") {
+      if (!window.confirm("当前研究正在运行，确定要强行重置并清空所有内容吗？")) return;
+      if (eventSourceRef.current) eventSourceRef.current.close();
+    }
+
+    if (workspaceId) {
+      try {
+        addLog(`🧹 正在物理销毁工作区: ${workspaceId}...`);
+        await fetch(`http://localhost:8002/api/workspaces/${workspaceId}`, { method: "DELETE" });
+        addLog(`✅ 工作区资源已彻底清理。`);
+      } catch (e) {
+        addLog(`⚠️ 清理工作区失败: ${e.message}`);
+      }
+    }
+
+    // 重置所有前端状态
+    setWorkspaceId(null);
+    setTaskId(null);
+    setStatus("idle");
+    setLogs([]);
+    setPlan(null);
+    setReport("");
+    setTasks({});
+    setFeedback("");
+    setDocuments([]);
+    setUploadingCount(0);
+    addLog("✨ 会话已重置，可以开始新的研究。");
+  };
+
+  const ensureWorkspace = async () => {
+    if (workspaceId) return workspaceId;
+    const response = await fetch("http://localhost:8002/api/workspaces", { method: "POST" });
+    if (!response.ok) throw new Error("创建工作区失败");
+    const data = await response.json();
+    setWorkspaceId(data.workspace_id);
+    addLog(`📦 已创建新工作区: ${data.workspace_id}`);
+    return data.workspace_id;
   };
 
   const startResearch = async () => {
+    if (status === "running") return;
     setStatus("running");
     setLogs([]);
     setReport("");
     setPlan(null);
     setTasks({}); 
-    const newThreadId = "thread_" + Date.now();
-    setThreadId(newThreadId);
-    // 端口保持您设置的 8002
-    const url = `http://localhost:8002/api/research/stream/${newThreadId}?goal=${encodeURIComponent(goal)}`;
-    connectSSE(url);
+    try {
+      const wsId = await ensureWorkspace();
+      const createTaskResp = await fetch("http://localhost:8002/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal, workspace_id: wsId }),
+      });
+      if (!createTaskResp.ok) throw new Error("创建任务失败");
+      const taskData = await createTaskResp.json();
+      setTaskId(taskData.task_id);
+      const url = `http://localhost:8002/api/tasks/${taskData.task_id}/stream?workspace_id=${encodeURIComponent(wsId)}&goal=${encodeURIComponent(goal)}`;
+      connectSSE(url);
+    } catch (e) {
+      addLog(`❌ 启动任务失败: ${e.message}`);
+      setStatus("idle");
+    }
   };
 
   const connectSSE = (url, isResume = false) => {
@@ -84,7 +140,7 @@ export default function App() {
       setReport(prev => prev + data.token);
     });
 
-    es.addEventListener("done", (event) => {
+    es.addEventListener("done", () => {
       setStatus("completed");
       addLog("✅ 任务全部完成！");
       es.close();
@@ -121,58 +177,31 @@ export default function App() {
     const file = e.target.files[0];
     if (!file) return;
 
-    setIsUploading(true);
+    setUploadingCount(prev => prev + 1);
     addLog(`📤 开始上传文件: ${file.name}`);
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      // 端口保持 8002
-      const response = await fetch("http://localhost:8002/api/ingest/upload", {
+      const wsId = await ensureWorkspace();
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(`http://localhost:8002/api/workspaces/${wsId}/documents`, {
         method: "POST",
         body: formData,
       });
-
-      if (!response.ok) throw new Error("Upload failed");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop();
-
-        lines.forEach(line => {
-          if (line.startsWith("event: ")) {
-            const match = line.match(/event: (.*)\n/);
-            if (!match) return;
-            const eventType = match[1];
-            const dataMatch = line.match(/data: (.*)/);
-            if (!dataMatch) return;
-            const dataContent = dataMatch[1];
-            const d = JSON.parse(dataContent);
-
-            // 复用 addLog 将解析日志显示在主日志窗口
-            if (eventType === "log") {
-                addLog(d.message);
-            } else if (eventType === "error") {
-                addLog(`❌ 解析错误: ${d.error}`);
-            }
-          }
-        });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || "Upload failed");
       }
-      addLog(`✅ 文件 ${file.name} 处理流程结束`);
+      const data = await response.json();
+      addLog(`✅ 文件 ${file.name} 处理完成，入库分块: ${data.chunk_count}`);
+      
+      // 更新已上传文件列表
+      setDocuments(prev => [...prev, { name: file.name, chunks: data.chunk_count, time: new Date().toLocaleTimeString() }]);
     } catch (e) {
       console.error(e);
       addLog(`❌ 上传/解析失败: ${e.message}`);
     } finally {
-      setIsUploading(false);
+      setUploadingCount(prev => Math.max(0, prev - 1));
       // 清空 input 防止重复上传同个文件不触发 change
       e.target.value = ""; 
     }
@@ -193,10 +222,10 @@ export default function App() {
 
   const fetchAndStream = async (action, fb = null) => {
     try {
-      const response = await fetch("http://localhost:8002/api/research/review", {
+      const response = await fetch("http://localhost:8002/api/tasks/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ thread_id: threadId, action, feedback: fb }),
+        body: JSON.stringify({ task_id: taskId, workspace_id: workspaceId, action, feedback: fb }),
       });
 
       const reader = response.body.getReader();
@@ -260,17 +289,27 @@ export default function App() {
   const sortedTasks = Object.values(tasks).sort((a, b) => (a.task_id || 0) - (b.task_id || 0));
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4 md:p-8 font-sans text-gray-800">
-      <div className="max-w-7xl mx-auto">
-        <header className="mb-8 text-center">
-          <h1 className="text-3xl md:text-4xl font-bold text-blue-600 flex items-center justify-center gap-3">
-            <FileText className="w-10 h-10" /> DeepResearch Agent
+    <div className="h-screen flex flex-col bg-gray-50 font-sans text-gray-800 overflow-hidden">
+      <div className="max-w-screen-2xl mx-auto w-full flex flex-col h-full p-4 md:p-6">
+        <header className="mb-4 text-center shrink-0">
+          <h1 className="text-2xl md:text-3xl font-bold text-blue-600 flex items-center justify-center gap-2">
+            <FileText className="w-8 h-8" /> DeepResearch Agent
           </h1>
-          <p className="text-gray-500 mt-2 text-lg">人机协同深度研究助手</p>
+          <p className="text-gray-500 text-sm mt-1">多源知识驱动的多智能体研究框架</p>
         </header>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm mb-6 border border-gray-100">
-          <div className="flex flex-col md:flex-row gap-4">
+        <div className="bg-white p-4 rounded-xl shadow-sm mb-4 border border-gray-100 shrink-0">
+          <div className="flex flex-col md:flex-row gap-3 items-center">
+            {/* 重置/新建按钮 */}
+            <button
+              onClick={resetSession}
+              className="bg-red-50 text-red-600 px-3 py-3 rounded-xl hover:bg-red-100 border border-red-100 flex items-center justify-center gap-2 transition-all whitespace-nowrap text-sm group"
+              title="重置会话并清空所有上传文档"
+            >
+              <RefreshCw className="w-4 h-4 group-hover:rotate-180 transition-transform duration-500" />
+              重置
+            </button>
+
             {/* 上传文件部分 */}
             <input 
                 type="file" 
@@ -281,12 +320,17 @@ export default function App() {
             />
             <button
               onClick={handleFileSelect}
-              disabled={status === "running" || isUploading}
-              className="bg-gray-100 text-gray-700 px-4 py-4 rounded-xl hover:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-300 border border-gray-200 flex items-center justify-center gap-2 transition-all whitespace-nowrap"
+              disabled={status === "running"}
+              className="bg-gray-50 text-gray-700 px-4 py-3 rounded-xl hover:bg-gray-100 disabled:bg-gray-50 disabled:text-gray-300 border border-gray-200 flex items-center justify-center gap-2 transition-all whitespace-nowrap text-sm relative"
               title="上传本地文档进行解析"
             >
-              {isUploading ? <Loader className="animate-spin w-5 h-5" /> : <Upload className="w-5 h-5" />}
+              {uploadingCount > 0 ? <Loader className="animate-spin w-4 h-4" /> : <Upload className="w-4 h-4" />}
               上传文档
+              {uploadingCount > 0 && (
+                <span className="absolute -top-2 -right-2 bg-blue-500 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center animate-pulse">
+                  {uploadingCount}
+                </span>
+              )}
             </button>
 
             <div className="flex-1 relative">
@@ -294,7 +338,7 @@ export default function App() {
                 type="text"
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
-                className="w-full px-5 py-4 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg shadow-sm"
+                className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-base shadow-sm"
                 placeholder="输入您的研究目标..."
                 disabled={status === "running"}
                 onKeyDown={(e) => e.key === 'Enter' && !status.match(/running|waiting/) && startResearch()}
@@ -303,31 +347,61 @@ export default function App() {
             <button
               onClick={startResearch}
               disabled={status === "running" || status === "waiting_review"}
-              className="bg-blue-600 text-white px-8 py-4 rounded-xl hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-bold text-lg whitespace-nowrap"
+              className="bg-blue-600 text-white px-6 py-3 rounded-xl hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-bold text-base whitespace-nowrap shadow-sm transition-all"
             >
-              {status === "running" ? <Loader className="animate-spin w-6 h-6" /> : <Play className="w-6 h-6" />}
+              {status === "running" ? <Loader className="animate-spin w-5 h-5" /> : <Play className="w-5 h-5" />}
               {status === "running" ? "研究中..." : "开始研究"}
             </button>
           </div>
+
+          {/* 已上传文档列表展示 */}
+          {documents.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2 animate-in slide-in-from-top-2 duration-300">
+              {documents.map((doc, idx) => (
+                <div key={idx} className="flex items-center gap-2 bg-blue-50/50 border border-blue-100 px-3 py-1.5 rounded-lg group hover:bg-blue-100/50 transition-colors">
+                  <div className="bg-white p-1 rounded border border-blue-200 shadow-sm">
+                    <File size={12} className="text-blue-500" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[11px] font-medium text-blue-800 truncate max-w-[150px]" title={doc.name}>
+                      {doc.name}
+                    </span>
+                    <span className="text-[9px] text-blue-400 leading-none">
+                      {doc.chunks} chunks • {doc.time}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[600px]">
-          {/* 左侧：日志区 */}
-          <div className="lg:col-span-3 flex flex-col h-[600px]">
-             <div className="bg-gray-900 text-green-400 p-4 rounded-xl shadow-md flex-1 overflow-hidden border border-gray-800 flex flex-col font-mono text-sm">
-              <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2 border-b border-gray-700 pb-2">
-                <Terminal size={14} /> 执行日志
+        <div className="flex gap-4 flex-1 min-h-0 pb-2 relative">
+          {/* 左侧：日志区 (可收起) */}
+          <div className={`${isLogsVisible ? 'w-1/4' : 'w-10'} flex flex-col h-full min-h-0 transition-all duration-300 ease-in-out relative group`}>
+             <button 
+                onClick={() => setIsLogsVisible(!isLogsVisible)}
+                className="absolute -right-3 top-1/2 -translate-y-1/2 z-20 bg-white border border-gray-200 rounded-full p-1 shadow-sm hover:bg-gray-50 text-gray-400 hover:text-blue-500 transition-all opacity-0 group-hover:opacity-100"
+                title={isLogsVisible ? "收起日志" : "展开日志"}
+             >
+                {isLogsVisible ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
+             </button>
+
+             <div className={`bg-gray-900 text-green-400 rounded-xl shadow-md h-full overflow-hidden border border-gray-800 flex flex-col font-mono transition-all duration-300 ${isLogsVisible ? 'p-4 opacity-100' : 'p-0 opacity-0 pointer-events-none'}`}>
+              <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2 border-b border-gray-700 pb-2 shrink-0">
+                <Terminal size={12} /> 执行日志
               </h2>
-              <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+              <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar scroll-smooth text-xs">
                 {logs.length === 0 && <div className="text-gray-600 italic text-center mt-10">...</div>}
                 {logs.map((log, i) => (
                   <div key={i} className="flex gap-2">
-                    <span className="text-gray-500 text-xs min-w-[50px]">{log.time}</span>
+                    <span className="text-gray-500 text-[10px] min-w-[45px] shrink-0">{log.time}</span>
                     <span className={`
                         ${log.message.includes("✅") ? "text-green-300 font-bold" : ""}
                         ${log.message.includes("❌") ? "text-red-400" : ""}
                         ${log.message.includes("上传") || log.message.includes("解析") ? "text-purple-300" : "text-gray-300"}
                         ${log.message.includes("不足") ? "text-yellow-300" : ""}
+                        break-all
                     `}>
                         {log.message}
                     </span>
@@ -336,39 +410,49 @@ export default function App() {
                 <div ref={logsEndRef} />
               </div>
             </div>
+
+            {!isLogsVisible && (
+                <div 
+                    onClick={() => setIsLogsVisible(true)}
+                    className="h-full w-full bg-gray-100 rounded-xl border border-dashed border-gray-300 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-200 transition-colors group/mini"
+                >
+                    <Terminal size={16} className="text-gray-400 group-hover/mini:text-blue-500" />
+                    <span className="[writing-mode:vertical-lr] text-[10px] text-gray-400 mt-4 font-bold uppercase tracking-widest group-hover/mini:text-blue-500">执行日志</span>
+                </div>
+            )}
           </div>
           
           {/* 中间：任务进度 */}
-          <div className="lg:col-span-4 flex flex-col h-[600px]">
-            <div className="bg-white p-4 rounded-xl shadow-md flex-1 overflow-y-auto border border-gray-100 flex flex-col">
-              <h2 className="text-sm font-bold text-gray-500 uppercase tracking-widest mb-4 flex items-center gap-2 border-b pb-2 sticky top-0 bg-white z-10">
-                <Search size={16} /> 实时研究进展
+          <div className="flex-1 flex flex-col h-full min-h-0 transition-all duration-300">
+            <div className="bg-white p-4 rounded-xl shadow-md h-full overflow-hidden border border-gray-100 flex flex-col">
+              <h2 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3 flex items-center gap-2 border-b pb-2 sticky top-0 bg-white z-10 shrink-0">
+                <Search size={14} /> 实时研究进展
               </h2>
-              <div className="space-y-4">
+              <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
                 {sortedTasks.length === 0 && (
-                  <div className="text-gray-400 text-center mt-20 text-sm">暂无任务，请开始研究...</div>
+                  <div className="text-gray-400 text-center mt-20 text-xs">暂无任务，请开始研究...</div>
                 )}
                 {sortedTasks.map((task) => (
-                  <div key={task.task_id} className={`p-4 rounded-lg border transition-all ${task.status === 'completed' ? 'border-green-200 bg-green-50' : 'border-blue-200 bg-blue-50'}`}>
-                    <div className="flex justify-between items-start mb-2">
-                      <h4 className="font-bold text-gray-800 text-sm flex items-center gap-2">
-                        <span className="bg-white border border-gray-200 text-gray-600 text-xs px-1.5 py-0.5 rounded">#{task.task_id}</span>
+                  <div key={task.task_id} className={`p-3 rounded-lg border transition-all ${task.status === 'completed' ? 'border-green-100 bg-green-50/50' : 'border-blue-100 bg-blue-50/50'}`}>
+                    <div className="flex justify-between items-start mb-1.5">
+                      <h4 className="font-bold text-gray-800 text-xs flex items-center gap-2">
+                        <span className="bg-white border border-gray-200 text-gray-500 text-[10px] px-1.5 py-0.5 rounded">#{task.task_id}</span>
                         {task.title}
                       </h4>
                       {task.status === 'researching' ? (
-                        <Loader size={14} className="animate-spin text-blue-500" />
+                        <Loader size={12} className="animate-spin text-blue-500" />
                       ) : (
-                        <CheckCircle size={14} className="text-green-500" />
+                        <CheckCircle size={12} className="text-green-500" />
                       )}
                     </div>
                     
                     {task.status === 'researching' && (
-                      <p className="text-xs text-blue-600 animate-pulse">🔍 {task.message.replace("正在研究", "").replace("任务...", "")} (研究中...)</p>
+                      <p className="text-[10px] text-blue-600 animate-pulse">🔍 {task.message.replace("正在研究", "").replace("任务...", "")} (研究中...)</p>
                     )}
                     
                     {task.status === 'completed' && (
-                      <div className="mt-2 text-xs text-gray-600 bg-white p-2 rounded border border-green-100">
-                        <strong className="block text-green-700 mb-1">💡 研究结论:</strong>
+                      <div className="mt-1.5 text-[11px] text-gray-600 bg-white p-2 rounded border border-green-50 leading-relaxed">
+                        <strong className="block text-green-700 mb-0.5 text-[10px] uppercase tracking-tighter">💡 研究结论:</strong>
                         {task.summary}
                       </div>
                     )}
@@ -379,29 +463,31 @@ export default function App() {
           </div>
 
           {/* 右侧：最终报告 */}
-          <div className="lg:col-span-5 flex flex-col h-[600px]">
-            <div className="bg-white p-6 rounded-xl shadow-md flex-1 overflow-y-auto border border-gray-100 relative">
-              <h2 className="text-sm font-bold text-gray-500 uppercase tracking-widest mb-4 flex items-center gap-2 border-b pb-2 sticky top-0 bg-white z-10">
-                <BookOpen size={16} /> 最终报告
-                {status === "running" && report && <span className="text-xs normal-case font-normal bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 animate-pulse">Writing...</span>}
+          <div className="flex-1 flex flex-col h-full min-h-0 transition-all duration-300">
+            <div className="bg-white p-5 rounded-xl shadow-md h-full overflow-hidden border border-gray-100 relative flex flex-col">
+              <h2 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3 flex items-center gap-2 border-b pb-2 sticky top-0 bg-white z-10 shrink-0">
+                <BookOpen size={14} /> 最终报告
+                {status === "running" && report && <span className="text-[10px] normal-case font-normal bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full ml-2 animate-pulse">Writing...</span>}
               </h2>
               
-              {report ? (
-                <div className="markdown-content max-w-none break-words text-sm">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
-                  >
-                    {getCleanReport(report)}
-                  </ReactMarkdown>
-                  {status === "running" && <span className="inline-block w-1.5 h-3 bg-blue-500 ml-1 animate-pulse align-middle"></span>}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-full text-gray-300 space-y-4">
-                  <FileText size={48} className="opacity-20" />
-                  <p className="text-sm">最终报告将在此处生成</p>
-                </div>
-              )}
+              <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                {report ? (
+                  <div className="markdown-content max-w-none break-words text-sm leading-relaxed prose prose-blue prose-sm">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
+                    >
+                      {getCleanReport(report)}
+                    </ReactMarkdown>
+                    {status === "running" && <span className="inline-block w-1.5 h-3 bg-blue-500 ml-1 animate-pulse align-middle"></span>}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-gray-300 space-y-3">
+                    <FileText size={40} className="opacity-10" />
+                    <p className="text-xs font-medium text-gray-400">最终报告将在此处生成</p>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>

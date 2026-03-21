@@ -20,6 +20,7 @@ evaluation/
 
 uploads/
 langfuse/data/
+data/
 
 notebook.ipynb
 test.ipynb
