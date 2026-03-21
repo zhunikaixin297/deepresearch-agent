@@ -117,7 +117,7 @@ class KnowledgeBaseMCPClient:
                             raw_citations = json_references["citations"]
                             sources = [cit.get("source", "Unknown MCP Source") for cit in raw_citations]
                         
-                        source_str = ", ".join(set(sources)) if sources else "Enterprise Knowledge Base (MCP)"
+                        source_str = ", ".join(set(sources)) if sources else "System"
                         
                         # We can try to extract the first valid URL from citations if available
                         # Or use a generic one if not.
@@ -147,12 +147,12 @@ class KnowledgeBaseMCPClient:
             
         return extracted_results
 
-    async def query_knowledge_hub(self, query: str, top_k: int = 5, collection: str = "default") -> List[Dict[str, str]]:
+    async def query_knowledge_hub(self, query: str, top_k: int = 5, collection: Optional[str] = None) -> List[Dict[str, str]]:
         """Legacy wrapper for query_knowledge_hub tool."""
-        return await self.call_tool(
-            "query_knowledge_hub", 
-            {"query": query, "top_k": top_k, "collection": collection}
-        )
+        args = {"query": query, "top_k": top_k}
+        if collection is not None:
+            args["collection"] = collection
+        return await self.call_tool("query_knowledge_hub", args)
 
 # Global instance for the factory
 _mcp_client: Optional[KnowledgeBaseMCPClient] = None

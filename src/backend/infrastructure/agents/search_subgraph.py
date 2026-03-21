@@ -11,9 +11,12 @@ from ..llm.factory import get_research_llm
 from .states import ResearchTask, RawSearchResult
 from ..mcp_connector.tools import get_dynamic_mcp_tools, parse_tool_output, web_search_tool
 from .prompt.worker_prompt import WORKER_SEARCH_ROUTING_PROMPT
+from .session_tools import create_analyze_workspace_documents_tool
+from ..repository.factory import get_session_retrieval_service, get_session_manager
 
 # State for Search Subgraph (用于包装 ReAct Agent 的输入输出)
 class SearchState(TypedDict):
+    goal: str
     task: ResearchTask
     search_results: Annotated[List[RawSearchResult], operator.add]
 
@@ -23,29 +26,25 @@ async def search_agent_node(state: SearchState, config: RunnableConfig) -> Dict[
     它会自动处理工具调用循环 (Action -> Tool -> Observation)。
     """
     task = state["task"]
+    session_tool = create_analyze_workspace_documents_tool(
+        retrieval_service=get_session_retrieval_service(),
+        session_manager=get_session_manager(),
+    )
     
     # 1. 动态获取工具
     mcp_tools = await get_dynamic_mcp_tools()
     
     if not mcp_tools:
-        await adispatch_custom_event(
-            "worker_progress", 
-            {
-                "task_id": task.id,
-                "title": task.title,
-                "status": "researching",
-                "message": "无法连接企业知识库 (MCP)，仅使用网络搜索..."
-            },
-            config=config
-        )
-        tools = [web_search_tool]
+        # 优化日志：只有当任务涉及企业知识但 MCP 不可用时才输出，或者简化输出
+        tools = [session_tool, web_search_tool]
     else:
-        tools = mcp_tools + [web_search_tool]
+        tools = [session_tool] + mcp_tools + [web_search_tool]
         
     llm = get_research_llm()
     
     # 2. 构建系统提示词
     system_msg = WORKER_SEARCH_ROUTING_PROMPT.format(
+        goal=state.get("goal", "未知研究目标"),
         query=task.query,
         intent=task.intent
     )
@@ -64,12 +63,61 @@ async def search_agent_node(state: SearchState, config: RunnableConfig) -> Dict[
     response = await agent.ainvoke({"messages": initial_messages}, config=config)
     messages = response.get("messages", [])
     
-    # 4. 从消息历史中提取最后一轮工具调用的结果
-    # 逻辑：从后往前找，提取最后一段连续的 ToolMessage
-    # 这样可以确保 Agent 在多次尝试后，返回的是它认为最相关的最新结果
+    # 4. 从消息历史中提取工具调用并记录日志
     new_results = []
     found_tool_msg = False
     
+    # 提取所有工具调用信息用于日志
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                t_name = tc["name"]
+                t_args = tc["args"]
+                # 映射工具友好名称
+                friendly_name = "会话文档检索" if t_name == "analyze_workspace_documents" else \
+                                "互联网搜索" if t_name in ["web_search", "web_search_tool"] else f"企业知识库 ({t_name})"
+                
+                await adispatch_custom_event(
+                    "worker_progress", 
+                    {
+                        "task_id": task.id,
+                        "title": task.title,
+                        "status": "researching",
+                        "message": f"正在使用 [{friendly_name}] 查找: {t_args.get('query', task.query)}"
+                    },
+                    config=config
+                )
+        
+        if isinstance(msg, ToolMessage):
+            # 记录工具执行结果状态
+            t_name = next((tc["name"] for tc in messages[messages.index(msg)-1].tool_calls if tc["id"] == msg.tool_call_id), "未知工具")
+            friendly_name = "会话文档检索" if t_name == "analyze_workspace_documents" else \
+                            "互联网搜索" if t_name in ["web_search", "web_search_tool"] else f"企业知识库 ({t_name})"
+            
+            parsed = parse_tool_output(msg.content)
+            # 过滤掉系统提示信息（如“未找到相关资料”、“尚未上传文档”等），只计算真实业务结果
+            business_results = [r for r in parsed if r.get("document_name") not in ["System", "Workspace Memory"]]
+            res_count = len(business_results)
+            
+            if res_count > 0:
+                log_res = f"[{friendly_name}] 找到 {res_count} 条相关资料。"
+            else:
+                # 如果业务结果为空，说明全是系统提示或真的没找到
+                log_res = f"[{friendly_name}] 未找到直接相关的参考资料。"
+                
+            await adispatch_custom_event(
+                "worker_progress", 
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "status": "researching",
+                    "message": log_res
+                },
+                config=config
+            )
+
+    # 5. 从消息历史中提取最后一轮工具调用的结果
+    # 逻辑：从后往前找，提取最后一段连续的 ToolMessage
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
             found_tool_msg = True

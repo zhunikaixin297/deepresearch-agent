@@ -125,7 +125,7 @@ def route_to_workers(state: MainState):
     
     # 使用 Send API 并行分发给 research_worker 节点
     # 注意：Send 的第一个参数是目标节点名称，第二个参数是传递给子图/节点的 state
-    return [Send("research_worker", {"task": t}) for t in pending_tasks]
+    return [Send("research_worker", {"task": t, "goal": state["goal"]}) for t in pending_tasks]
 
 # 【修改】增加 config 参数
 async def research_worker_adapter_node(state: dict, config: RunnableConfig):

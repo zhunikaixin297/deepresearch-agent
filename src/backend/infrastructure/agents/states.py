@@ -51,6 +51,7 @@ class RawSearchResult(TypedDict):
     provider: Optional[str]  # e.g., "mcp", "tavily", "duckduckgo"
 
 class WorkerState(TypedDict):
+    goal: str
     task: ResearchTask
     raw_data: List[RawSearchResult]
     final_result: Optional[TaskResult]
