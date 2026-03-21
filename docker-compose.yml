@@ -28,8 +28,8 @@ services:
       # 格式：./本地文件夹名:容器内路径
       - ./opensearch_data:/usr/share/opensearch/data
     ports:
-      - "127.0.0.1:9200:9200"
-      - "127.0.0.1:9600:9600"
+      - "9200:9200"
+      - "9600:9600"
     networks:
       - opensearch-dev-net
 
@@ -40,7 +40,7 @@ services:
     image: opensearchproject/opensearch-dashboards:3
     container_name: opensearch-dashboards-dev
     ports:
-      - "127.0.0.1:5601:5601"
+      - "5601:5601"
     environment:
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
       # 指向同一个网络内的 opensearch-node

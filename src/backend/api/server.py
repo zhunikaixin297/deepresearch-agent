@@ -1,24 +1,69 @@
 import uvicorn
-import shutil
 import uuid
 import os
-import asyncio 
 import aiofiles
-import json
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
+import asyncio
+import time
+import logging
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # 导入服务接口定义和请求模型 (注意别名，避免混淆)
 from ..services.agent_service import AgentService, ReportRequest as ServiceReportRequest
 from ..domain.models import DocumentSource
-from ..domain.interfaces import Ingestor
+from ..services.ingestion_service import IngestionService
 # 导入工厂方法
-from ..services.factory import get_agent_service, get_ingestion_service
+from ..services.factory import get_agent_service, get_workspace_ingestion_service
+from ..infrastructure.repository.session_memory_manager import get_session_memory_manager
+from ..infrastructure.repository.workspace_registry import get_workspace_registry
+from ..core.config import settings
 # 导入 API 层定义的 Schema
-from .schemas import ResearchRequest, ReviewRequest
+from .schemas import (
+    ResearchRequest,
+    ReviewRequest,
+    WorkspaceCreateResponse,
+    DocumentUploadResponse,
+    ResearchStartResponse,
+)
+
+log = logging.getLogger(__name__)
+
+# ==========================================
+# 0. 定时清理后台任务
+# ==========================================
+
+async def auto_cleanup_workspaces():
+    """
+    后台任务：定期清理过期工作区。
+    """
+    manager = get_session_memory_manager(settings.session_rag)
+    registry = get_workspace_registry(settings.session_rag.workspace_registry_db)
+    
+    while True:
+        try:
+            # 使用配置中的 TTL
+            ttl = settings.session_rag.workspace_ttl
+            expired_ids = registry.get_expired_workspaces(ttl)
+            
+            for workspace_id in expired_ids:
+                log.info(f"正在自动清理过期工作区 (TTL 过期): {workspace_id}")
+                manager.cleanup_workspace(workspace_id)
+                registry.delete_workspace(workspace_id)
+            
+            # 每小时检查一次
+            await asyncio.sleep(3600)
+        except Exception as e:
+            log.error(f"自动清理后台任务异常: {e}")
+            await asyncio.sleep(60)
 
 app = FastAPI(title="Research Agent API")
+
+@app.on_event("startup")
+async def startup_event():
+    # 启动后台清理协程
+    asyncio.create_task(auto_cleanup_workspaces())
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,26 +77,38 @@ app.add_middleware(
 # 1. DeepResearch 服务接口
 # ==========================================
 
-@app.post("/api/research/start")
-async def start_research(req: ResearchRequest):
+@app.post("/api/tasks", response_model=ResearchStartResponse)
+async def start_task(req: ResearchRequest):
     """
     启动任务接口
     """
-    return {"status": "ready", "thread_id": req.thread_id}
+    manager = get_session_memory_manager(settings.session_rag)
+    manager.get_or_create_workspace(req.workspace_id)
+    
+    # 触碰工作区，更新活跃时间
+    get_workspace_registry().touch_workspace(req.workspace_id)
+    
+    task_id = str(uuid.uuid4())
+    return ResearchStartResponse(workspace_id=req.workspace_id, task_id=task_id)
 
-@app.get("/api/research/stream/{thread_id}")
-async def stream_research(
-    thread_id: str, 
+@app.get("/api/tasks/{task_id}/stream")
+async def stream_task(
+    task_id: str,
+    workspace_id: str,
     goal: str,
     service: AgentService = Depends(get_agent_service)
 ):
     """
     SSE 流式输出接口
     """
+    # 触碰工作区
+    get_workspace_registry().touch_workspace(workspace_id)
+
     # 构造 ServiceReportRequest 对象
     # 不再直接传 input_data，而是传封装好的 request 对象
     service_request = ServiceReportRequest(
-        report_id=thread_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
         query=goal,
         action="start"
     )
@@ -61,7 +118,7 @@ async def stream_research(
         media_type="text/event-stream"
     )
 
-@app.post("/api/research/review")
+@app.post("/api/tasks/review")
 async def review_plan(
     req: ReviewRequest,
     service: AgentService = Depends(get_agent_service)
@@ -72,9 +129,13 @@ async def review_plan(
     if req.action not in ["approve", "revise"]:
         raise HTTPException(status_code=400, detail="Invalid action")
 
+    # 触碰工作区
+    get_workspace_registry().touch_workspace(req.workspace_id)
+
     # 构造 ServiceReportRequest 对象 (Resume 模式)
     service_request = ServiceReportRequest(
-        report_id=req.thread_id,
+        task_id=req.task_id,
+        workspace_id=req.workspace_id,
         action=req.action, 
         feedback=req.feedback,
         query=None # 恢复阶段通常不需要 query
@@ -88,11 +149,9 @@ async def review_plan(
 # ==========================================
 # 2. 文档上传与解析接口
 # ==========================================
-UPLOAD_DIR = "uploads"
-# 限制最大文件大小 (100MB)
-MAX_FILE_SIZE_MB = 100
+# 限制最大文件大小
+MAX_FILE_SIZE_MB = settings.server.max_file_size_mb
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # 辅助函数：异步保存文件
 async def save_upload_file_async(upload_file: UploadFile, destination: str):
@@ -122,72 +181,80 @@ async def save_upload_file_async(upload_file: UploadFile, destination: str):
             os.remove(destination)
         raise HTTPException(status_code=500, detail=f"文件保存失败: {e}")
 
-@app.post("/api/ingest/upload")
-async def upload_and_ingest_document(
+@app.post("/api/workspaces", response_model=WorkspaceCreateResponse)
+async def create_workspace():
+    workspace_id = str(uuid.uuid4())
+    manager = get_session_memory_manager(settings.session_rag)
+    manager.init_workspace_env(workspace_id)
+    manager.workspace_documents_dir(workspace_id).mkdir(parents=True, exist_ok=True)
+    
+    # 初始化注册表记录
+    get_workspace_registry().touch_workspace(workspace_id)
+    
+    return WorkspaceCreateResponse(workspace_id=workspace_id)
+
+
+@app.post("/api/workspaces/{workspace_id}/documents", response_model=DocumentUploadResponse)
+async def upload_workspace_document(
+    workspace_id: str,
     file: UploadFile = File(...),
-    ingestion_service: Ingestor = Depends(get_ingestion_service)
+    ingestion_service: IngestionService = Depends(get_workspace_ingestion_service)
 ):
     """
     上传文件并触发解析流程，实时流式返回解析日志。
     """
-    # 1. 准备路径
-    if not os.path.exists(UPLOAD_DIR):
-        os.makedirs(UPLOAD_DIR)
-        
+    # 触碰工作区
+    get_workspace_registry().touch_workspace(workspace_id)
+
+    manager = get_session_memory_manager(settings.session_rag)
+    manager.init_workspace_env(workspace_id)
+    workspace_docs_dir = manager.workspace_documents_dir(workspace_id)
+    workspace_docs_dir.mkdir(parents=True, exist_ok=True)
+    current_count = manager.workspace_document_count(workspace_id)
+    if current_count >= settings.session_rag.max_workspace_documents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前工作区文档数量已达上限 {settings.session_rag.max_workspace_documents}",
+        )
+
     safe_filename = f"{uuid.uuid4()}_{file.filename}"
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    workspace_file_path = workspace_docs_dir / safe_filename
     
-    # 2. 异步保存文件，避免阻塞主线程
-    await save_upload_file_async(file, file_path)
-    abs_file_path = os.path.abspath(file_path)
-    # 3. 创建 DocumentSource 对象
+    # 直接保存到工作区目录
+    await save_upload_file_async(file, str(workspace_file_path))
+
     source = DocumentSource(
-        file_path=abs_file_path,
+        file_path=workspace_file_path,
         document_name=file.filename,
-        document_id=str(uuid.uuid4())
+        document_id=str(uuid.uuid4()),
+        metadata={"workspace_id": workspace_id},
     )
 
-    # 4. 定义流式生成器
-    async def ingestion_stream_generator():
-        queue = asyncio.Queue()
-        STOP_SIGNAL = object()
-
-        async def status_callback(msg: str):
-            # 构造标准的 SSE 格式
-            sse_msg = f"event: log\ndata: {json.dumps({'message': msg}, ensure_ascii=False)}\n\n"
-            await queue.put(sse_msg)
-
-        async def run_pipeline():
-            try:
-                await status_callback(f"文件: {file.filename} 上传成功，开始解析...")
-                await ingestion_service.pipeline(source, status_callback)
-                await status_callback("✅ 解析流程完成。")
-            except Exception as e:
-                error_data = json.dumps({'error': str(e)}, ensure_ascii=False)
-                await queue.put(f"event: error\ndata: {error_data}\n\n")
-            finally:
-                await queue.put(STOP_SIGNAL)
-
-        # 启动后台任务
-        task = asyncio.create_task(run_pipeline())
-
-        try:
-            while True:
-                data = await queue.get()
-                if data is STOP_SIGNAL:
-                    break
-                yield data
-        except asyncio.CancelledError:
-            # 如果前端断开连接（比如用户刷新页面），取消后台任务
-            task.cancel()
-            raise
-
-    return StreamingResponse(
-        ingestion_stream_generator(),
-        media_type="text/event-stream",
-        # 防止 Nginx 等代理服务器缓存流式响应
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"} 
+    chunk_count = await ingestion_service.pipeline_workspace_document(
+        source=source,
+        workspace_id=workspace_id,
     )
+    return DocumentUploadResponse(
+        workspace_id=workspace_id,
+        file_name=file.filename,
+        status="parsed",
+        chunk_count=chunk_count,
+    )
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str):
+    manager = get_session_memory_manager(settings.session_rag)
+    manager.cleanup_workspace(workspace_id)
+    
+    # 从注册表中删除
+    get_workspace_registry().delete_workspace(workspace_id)
+    
+    return {"status": "ok", "workspace_id": workspace_id}
 
 if __name__ == "__main__":
-    uvicorn.run("src.backend.api.server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "src.backend.api.server:app",
+        host=settings.server.host,
+        port=settings.server.port,
+        reload=False,  # 默认关闭 reload，防止上传文件触发重启导致连接断开
+    )

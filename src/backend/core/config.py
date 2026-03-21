@@ -101,6 +101,16 @@ class DoclingGeneralSettings(BaseConfigSettings):
     
     accelerator_device: str = "CPU"
     accelerator_num_threads: int = 4
+    max_concurrent_docs: int = 1
+
+
+class ServerSettings(BaseConfigSettings):
+    """API 服务器配置 (SERVER_*)"""
+    model_config = SettingsConfigDict(env_prefix="SERVER_")
+    
+    host: str = "0.0.0.0"
+    port: int = 8002
+    max_file_size_mb: int = 100
 
 
 class TextSplitterSettings(BaseConfigSettings):
@@ -177,6 +187,21 @@ class SearchSettings(BaseConfigSettings):
     ddg_backend: str = "auto"
 
 
+class SessionRAGSettings(BaseConfigSettings):
+    """会话级 RAG 配置 (SESSION_RAG_*)"""
+    model_config = SettingsConfigDict(env_prefix="SESSION_RAG_")
+    
+    chroma_path: str = "data/chroma_workspaces"
+    workspaces_root: str = "data/workspaces"
+    top_k: int = 10
+    top_n: int = 5
+    max_workspace_documents: int = 9
+    ingestion_max_concurrency: int = 2
+    distance_metric: str = "cosine"
+    workspace_ttl: int = 86400  # 默认 24 小时
+    workspace_registry_db: str = "data/workspaces_registry.db"
+
+
 # =============================================================================
 #  4. 主配置聚合类
 # =============================================================================
@@ -188,8 +213,10 @@ class Settings(BaseConfigSettings):
     # --- 全局 ---
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     litellm_proxy_url: str = Field(validation_alias="LITELLM_PROXY_URL")
+    hf_endpoint: str = Field(default="https://hf-mirror.com", validation_alias="HF_ENDPOINT")
 
     # --- 模块 ---
+    server: ServerSettings = Field(default_factory=ServerSettings)
     docling_vlm: DoclingVLMSettings = Field(default_factory=DoclingVLMSettings)
     docling_llm: DoclingLLMSettings = Field(default_factory=DoclingLLMSettings)
     docling_general: DoclingGeneralSettings = Field(default_factory=DoclingGeneralSettings)
@@ -207,6 +234,7 @@ class Settings(BaseConfigSettings):
     langfuse: LangfuseSettings = Field(default_factory=LangfuseSettings)
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
+    session_rag: SessionRAGSettings = Field(default_factory=SessionRAGSettings)
 
     def get_llm_config_by_name(self, name: str) -> LLMProviderConfig:
         """
