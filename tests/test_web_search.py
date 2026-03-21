@@ -8,10 +8,12 @@ import logging
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from src.backend.infrastructure.mcp_connector.tools import web_search_tool, parse_tool_output
+import pytest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@pytest.mark.asyncio
 async def test_web_search():
     """
     Test script to verify the Web Search tool (DuckDuckGo).

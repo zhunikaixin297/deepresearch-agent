@@ -7,10 +7,12 @@ import logging
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from src.backend.infrastructure.mcp_connector.client import get_mcp_client
+import pytest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@pytest.mark.asyncio
 async def test_mcp_connectivity():
     """
     Test script to verify MCP Client connectivity and tool discovery.
