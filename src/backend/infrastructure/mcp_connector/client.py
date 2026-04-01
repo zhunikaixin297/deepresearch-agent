@@ -110,37 +110,49 @@ class KnowledgeBaseMCPClient:
                     
                     # If we got valid results, format them for the agent
                     if markdown_content.strip():
-                        # Extract citations to list as document sources
-                        sources = []
                         raw_citations = []
                         if json_references and "citations" in json_references:
                             raw_citations = json_references["citations"]
-                            sources = [cit.get("source", "Unknown MCP Source") for cit in raw_citations]
-                        
-                        source_str = ", ".join(set(sources)) if sources else "System"
-                        
-                        # We can try to extract the first valid URL from citations if available
-                        # Or use a generic one if not.
-                        primary_url = None
-                        primary_score = None
-                        
-                        if raw_citations:
-                            # Try to find a 'url' field in citations, or maybe 'source' is a URL/Path
-                            # For now, let's assume 'source' might be a file path or name.
-                            # We keep primary_url None unless we find something looking like a URL.
-                            
-                            # Extract the max score if available in metadata
-                            scores = [float(cit.get("score", 0)) for cit in raw_citations if "score" in cit]
-                            if scores:
-                                primary_score = max(scores)
 
-                        extracted_results.append({
-                            "content": markdown_content.strip(),
-                            "document_name": source_str,
-                            "url": primary_url,
-                            "score": primary_score, 
-                            "provider": "knowledge base"  
-                        })
+                        # For query_knowledge_hub, expose one result per citation so
+                        # downstream logs/metrics reflect real retrieved result count.
+                        if tool_name == "query_knowledge_hub" and raw_citations:
+                            for cit in raw_citations:
+                                metadata = cit.get("metadata") or {}
+                                source = cit.get("source", "Unknown MCP Source")
+                                source_ref = metadata.get("source_ref")
+                                doc_hash = metadata.get("doc_hash")
+                                doc_tokens = []
+                                if source_ref:
+                                    doc_tokens.append(f"source_ref={source_ref}")
+                                if doc_hash:
+                                    doc_tokens.append(f"doc_hash={doc_hash}")
+                                suffix = f" ({', '.join(doc_tokens)})" if doc_tokens else ""
+
+                                extracted_results.append({
+                                    "content": cit.get("text_snippet", "") or markdown_content.strip(),
+                                    "document_name": f"{source}{suffix}",
+                                    "url": None,
+                                    "score": float(cit.get("score", 0.0)) if cit.get("score") is not None else None,
+                                    "provider": "knowledge base",
+                                })
+                        else:
+                            # Fallback for tools without citations (e.g., list_collections/get_document_summary)
+                            sources = [cit.get("source", "Unknown MCP Source") for cit in raw_citations]
+                            source_str = ", ".join(set(sources)) if sources else "System"
+                            primary_score = None
+                            if raw_citations:
+                                scores = [float(cit.get("score", 0)) for cit in raw_citations if "score" in cit]
+                                if scores:
+                                    primary_score = max(scores)
+
+                            extracted_results.append({
+                                "content": markdown_content.strip(),
+                                "document_name": source_str,
+                                "url": None,
+                                "score": primary_score,
+                                "provider": "knowledge base",
+                            })
                         
         except Exception as e:
             logger.error(f"Failed to execute MCP tool call: {e}")

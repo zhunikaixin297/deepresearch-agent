@@ -1,10 +1,10 @@
 # 多源知识驱动的多智能体研究框架
 
-[![Python Version](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-Latest-green.svg)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://reactjs.org)
-[![LangGraph](https://img.shields.io/badge/LangGraph-Latest-purple.svg)](https://langchain-ai.github.io/langgraph)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[!\[Python Version\](https://img.shields.io/badge/Python-3.11+-blue.svg null)](https://python.org)
+[!\[FastAPI\](https://img.shields.io/badge/FastAPI-Latest-green.svg null)](https://fastapi.tiangolo.com)
+[!\[React\](https://img.shields.io/badge/React-19-61dafb.svg null)](https://reactjs.org)
+[!\[LangGraph\](https://img.shields.io/badge/LangGraph-Latest-purple.svg null)](https://langchain-ai.github.io/langgraph)
+[!\[License\](https://img.shields.io/badge/License-MIT-yellow.svg null)](LICENSE)
 
 ## 📖 项目简介
 
@@ -80,7 +80,7 @@ Worker Agent 根据任务意图，通过语义路由动态选择知识源：
 
 在开始之前，请确保您的系统已安装以下依赖：
 
-- **Python**: 3.13+
+- **Python**: 3.11+
 - **Node.js**: 18+
 - **Docker**: 20.10+
 - **UV**: 高性能Python包管理器
@@ -516,7 +516,7 @@ docker-compose up -d tei-reranker
    - 向量维度：2560
    - 将向量和元数据存储到Chroma
 
-**预期耗时：** 文档解析时间取决于文档大小和复杂度。（实测，对于文本型pdf，七十页的硕士论文处理时间在3-8分钟，实际时间与图片数量有关。）
+**预期耗时：** 文档解析时间取决于文档大小和复杂度。（实测，会话文档上传 30+ 页 PDF 不超过 1 分钟。）
 
 ### 2. 创建研究任务
 
@@ -798,11 +798,9 @@ deepresearch-agent/
 感谢以下开源项目：
 
 - [LangGraph](https://langchain-ai.github.io/langgraph) - 智能体编排框架
-- [Docling](https://github.com/DS4SD/docling) - 文档解析引擎<br />
+- [Docling](https://github.com/DS4SD/docling) - 文档解析引擎
 - [DeepResearch](https://github.com/yjryjrhehe/deepresearch-agent) - 多智能体深度研究系统
 - [MODULAR-RAG-MCP-SERVER](https://github.com/zhunikaixin297/MODULAR-RAG-MCP-SERVER) - 模块化 RAG MCP 服务框架
 - [FastAPI](https://fastapi.tiangolo.com) - Web框架
 - [React](https://reactjs.org) - 前端框架
-
-  <br />
 

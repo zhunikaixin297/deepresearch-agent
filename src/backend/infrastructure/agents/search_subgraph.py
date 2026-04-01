@@ -3,6 +3,7 @@ import operator
 import json
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
+from langgraph.errors import GraphRecursionError
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import adispatch_custom_event
@@ -10,7 +11,11 @@ from langchain_core.callbacks import adispatch_custom_event
 from ..llm.factory import get_research_llm
 from .states import ResearchTask, RawSearchResult
 from ..mcp_connector.tools import get_dynamic_mcp_tools, parse_tool_output, web_search_tool
-from .prompt.worker_prompt import WORKER_SEARCH_ROUTING_PROMPT
+from .prompt.worker_prompt import (
+    WORKER_SEARCH_ROUTING_SYSTEM_PROMPT,
+    WORKER_SEARCH_ROUTING_USER_PROMPT,
+)
+from .utils import construct_messages_with_fallback
 from .session_tools import create_analyze_workspace_documents_tool
 from ..repository.factory import get_session_retrieval_service, get_session_manager
 
@@ -42,11 +47,15 @@ async def search_agent_node(state: SearchState, config: RunnableConfig) -> Dict[
         
     llm = get_research_llm()
     
-    # 2. 构建系统提示词
-    system_msg = WORKER_SEARCH_ROUTING_PROMPT.format(
-        goal=state.get("goal", "未知研究目标"),
-        query=task.query,
-        intent=task.intent
+    # 2. 优先从 Langfuse 获取搜索路由提示词
+    context_vars = {
+        "goal": state.get("goal", "未知研究目标"),
+        "query": task.query,
+        "intent": task.intent,
+    }
+    messages, _ = construct_messages_with_fallback(
+        "worker/search-routing",
+        context_vars,
     )
     
     # 3. 创建并调用 ReAct Agent
@@ -55,12 +64,46 @@ async def search_agent_node(state: SearchState, config: RunnableConfig) -> Dict[
     agent = create_react_agent(llm, tools=tools)
     
     # 初始化对话，让模型开始搜索，同时传递系统提示词
-    initial_messages = [
-        SystemMessage(content=system_msg),
-        HumanMessage(content=f"请根据系统提示词，开始执行搜索任务。查询词: {task.query}")
-    ]
+    if messages is None:
+        system_msg = WORKER_SEARCH_ROUTING_SYSTEM_PROMPT
+        user_msg = WORKER_SEARCH_ROUTING_USER_PROMPT.format(
+            goal=context_vars["goal"],
+            query=task.query,
+            intent=task.intent,
+        )
+        initial_messages = [
+            SystemMessage(content=system_msg),
+            HumanMessage(content=user_msg),
+        ]
+    else:
+        initial_messages = messages
     
-    response = await agent.ainvoke({"messages": initial_messages}, config=config)
+    invoke_config = dict(config or {})
+    invoke_config.setdefault("recursion_limit", 60)
+    try:
+        response = await agent.ainvoke({"messages": initial_messages}, config=invoke_config)
+    except GraphRecursionError:
+        await adispatch_custom_event(
+            "worker_progress",
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "status": "researching",
+                "message": "搜索子图达到递归上限，已提前结束本轮搜索并返回当前可用结果。",
+            },
+            config=config,
+        )
+        return {
+            "search_results": [
+                {
+                    "content": f"Search recursion limit reached for query: {task.query}",
+                    "document_name": "System",
+                    "url": None,
+                    "score": None,
+                    "provider": "system",
+                }
+            ]
+        }
     messages = response.get("messages", [])
     
     # 4. 从消息历史中提取工具调用并记录日志
@@ -68,11 +111,15 @@ async def search_agent_node(state: SearchState, config: RunnableConfig) -> Dict[
     found_tool_msg = False
     
     # 提取所有工具调用信息用于日志
+    tool_name_by_call_id: Dict[str, str] = {}
     for msg in messages:
         if isinstance(msg, AIMessage) and msg.tool_calls:
             for tc in msg.tool_calls:
                 t_name = tc["name"]
                 t_args = tc["args"]
+                tc_id = tc.get("id")
+                if tc_id:
+                    tool_name_by_call_id[tc_id] = t_name
                 # 映射工具友好名称
                 friendly_name = "会话文档检索" if t_name == "analyze_workspace_documents" else \
                                 "互联网搜索" if t_name in ["web_search", "web_search_tool"] else f"企业知识库 ({t_name})"
@@ -90,7 +137,7 @@ async def search_agent_node(state: SearchState, config: RunnableConfig) -> Dict[
         
         if isinstance(msg, ToolMessage):
             # 记录工具执行结果状态
-            t_name = next((tc["name"] for tc in messages[messages.index(msg)-1].tool_calls if tc["id"] == msg.tool_call_id), "未知工具")
+            t_name = tool_name_by_call_id.get(msg.tool_call_id, "未知工具")
             friendly_name = "会话文档检索" if t_name == "analyze_workspace_documents" else \
                             "互联网搜索" if t_name in ["web_search", "web_search_tool"] else f"企业知识库 ({t_name})"
             
