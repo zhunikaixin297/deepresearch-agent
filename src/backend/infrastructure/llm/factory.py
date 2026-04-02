@@ -54,6 +54,7 @@ def _create_chat_llm(config_name: str, temperature: float = 0, max_retries: int 
         api_key=config.api_key,
         model=config.model,
         temperature=temperature,
+        stream_usage=True,
         max_retries=max_retries,
         config_name=config_name
     )
