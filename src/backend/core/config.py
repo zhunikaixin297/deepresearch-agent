@@ -171,8 +171,8 @@ class MCPSettings(BaseConfigSettings):
     # 如果为空，则回退到本地 Stdio 启动模式
     server_sse_url: Optional[str] = None
     
-    # Stdio 模式下的本地路径 (MODULAR-RAG-MCP-SERVER 项目根目录)
-    server_local_path: str = "/home/zzl/code/MODULAR-RAG-MCP-SERVER"
+    # Stdio 模式下的本地路径 (Enterprise-Modular-RAG-MCP 项目根目录)
+    server_local_path: str = "/home/zzl/code/deepresearch-system/Enterprise-Modular-RAG-MCP"
 
 
 class SearchSettings(BaseConfigSettings):

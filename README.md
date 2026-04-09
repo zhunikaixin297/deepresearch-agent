@@ -93,8 +93,8 @@ Worker Agent 根据任务意图，通过语义路由动态选择知识源：
 ### 1. 克隆项目和安装依赖
 
 ```bash
-git clone https://github.com/yjryjrhehe/deepresearch-agent.git
-cd deepresearch-agent
+git clone https://github.com/zhunikaixin297/Multi-Source-Research-Agent.git
+cd Multi-Source-Research-Agent
 
 # 首先安装 uv
 # pip install uv
@@ -644,7 +644,7 @@ Langfuse是一个开源的LLM应用可观测性平台，本项目集成了Langfu
 ## 🛠️ 项目结构
 
 ```
-deepresearch-agent/
+Multi-Source-Research-Agent/
 ├── src/
 │   ├── backend/
 │   │   ├── api/                    # API层
